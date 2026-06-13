@@ -188,23 +188,26 @@ def show_welcome_guide():
     """
     Renders a full-screen welcome/onboarding guide using OpenCV.
     Shows hand sign illustrations (drawn with shapes), gesture names, meanings,
-    and waits for ENTER/SPACE to proceed or Q to quit.
+    and waits for SPACE to proceed or Q to quit.
     Returns True to continue to webcam, False to quit.
     """
     # Create a 1280x720 white canvas
     W, H = 1280, 720
     canvas = np.ones((H, W, 3), dtype=np.uint8) * 255
 
+    # Helper to center text
+    def draw_centered_text(text, y, font, scale, color, thickness):
+        size, _ = cv2.getTextSize(text, font, scale, thickness)
+        tx = (W - size[0]) // 2
+        cv2.putText(canvas, text, (tx, y), font, scale, color, thickness, cv2.LINE_AA)
+
     # --- Title Section ---
-    cv2.putText(canvas, "SignSpeak", (W // 2 - 180, 55),
-                cv2.FONT_HERSHEY_DUPLEX, 1.8, ACCENT_BLUE, 3, cv2.LINE_AA)
-    cv2.putText(canvas, "Hand Sign Guide", (W // 2 - 145, 90),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.75, DARK_TEXT, 2, cv2.LINE_AA)
+    draw_centered_text("SignSpeak - Learn Hand Signs", 65, cv2.FONT_HERSHEY_DUPLEX, 1.4, ACCENT_BLUE, 3)
     # Decorative underline
-    cv2.line(canvas, (W // 2 - 200, 105), (W // 2 + 200, 105), ACCENT_BLUE, 2)
+    cv2.line(canvas, (W // 2 - 280, 85), (W // 2 + 280, 85), ACCENT_BLUE, 2)
 
     # --- Column Headers ---
-    header_y = 140
+    header_y = 130
     cv2.putText(canvas, "HAND SIGN", (100, header_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, LIGHT_GRAY, 1, cv2.LINE_AA)
     cv2.putText(canvas, "GESTURE", (260, header_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, LIGHT_GRAY, 1, cv2.LINE_AA)
     cv2.putText(canvas, "MEANING", (500, header_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, LIGHT_GRAY, 1, cv2.LINE_AA)
@@ -216,18 +219,18 @@ def show_welcome_guide():
 
     # --- Gesture Data (split into 2 columns of 4) ---
     gestures = [
-        (draw_thumbs_up, "Thumbs Up",       "Good / Yes"),
-        (draw_open_palm,  "Open Palm",       "Stop / Wait"),
-        (draw_wave,       "Wave / Shake",    "Hello"),
-        (draw_peace,      "Two Fingers",     "Peace / Victory"),
-        (draw_fist,       "Closed Fist",     "No / Angry"),
-        (draw_call_me,    "Pinky + Thumb",   "Call Me"),
-        (draw_point_up,   "Point Up",        "Yes / I Agree"),
-        (draw_please,     "Fingers Together", "Please"),
+        (draw_thumbs_up, "Thumbs Up",     "Good/Yes"),
+        (draw_open_palm,  "Open Palm",     "Stop/Wait"),
+        (draw_wave,       "Wave Hand",     "Hello"),
+        (draw_peace,      "Two Fingers",   "Peace"),
+        (draw_fist,       "Closed Fist",   "No"),
+        (draw_point_up,   "Point Up",      "I Agree"),
+        (draw_call_me,    "Pinky+Thumb",   "Call Me"),
+        (draw_please,     "Flat Hand",     "Please"),
     ]
 
     row_height = 110
-    start_y = 205
+    start_y = 195
     icon_size = 70
 
     for i, (draw_fn, name, meaning) in enumerate(gestures):
@@ -270,22 +273,19 @@ def show_welcome_guide():
 
     # --- Footer Instructions ---
     footer_y = H - 45
-    cv2.putText(canvas, "Press ENTER or SPACE to Start Camera", (W // 2 - 220, footer_y),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, ACCENT_GREEN, 2, cv2.LINE_AA)
-    cv2.putText(canvas, "Press Q to Quit", (W // 2 - 70, footer_y + 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, LIGHT_GRAY, 1, cv2.LINE_AA)
+    draw_centered_text("Press SPACE to Start | Press Q to Quit", footer_y, cv2.FONT_HERSHEY_SIMPLEX, 0.75, ACCENT_GREEN, 2)
 
     # --- Show Guide Window ---
-    guide_window = "SignSpeak - Hand Sign Guide"
+    guide_window = "SignSpeak - Learn Hand Signs"
     cv2.namedWindow(guide_window, cv2.WND_PROP_FULLSCREEN)
     cv2.setWindowProperty(guide_window, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
     cv2.imshow(guide_window, canvas)
 
-    print("Welcome guide displayed. Press ENTER/SPACE to start or Q to quit.")
+    print("Welcome guide displayed. Press SPACE to start or Q to quit.")
 
     while True:
         key = cv2.waitKey(0) & 0xFF
-        if key == 13 or key == 32:  # ENTER or SPACE
+        if key == 32:  # SPACE
             cv2.destroyWindow(guide_window)
             return True
         elif key == ord('q') or key == ord('Q'):
