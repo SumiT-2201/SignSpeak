@@ -1,0 +1,555 @@
+#!/usr/bin/env python3
+"""
+SignSpeak Communicator (app.py)
+This is the final application designed for non-speaking people to communicate using hand signs.
+It tracks hand landmarks in real-time, recognizes sign gestures, builds sentences that display
+at the bottom of the screen, speaks words out loud when locked-in, and allows saving or clearing sentences.
+"""
+
+import os
+import sys
+import cv2
+import time
+import joblib
+import threading
+import numpy as np
+import mediapipe as mp
+import pyttsx3
+from datetime import datetime
+
+MODEL_PATH = "models/sign_model.pkl"
+LOCK_IN_DURATION = 1.5  # Seconds to hold a gesture to speak/lock it
+CONFIDENCE_THRESHOLD = 0.85  # Minimum confidence to trigger lock-in
+SAVE_FILE_PATH = "saved_sentences.txt"
+
+# Thread-safe Speech Synthesis helper
+speech_lock = threading.Lock()
+
+def speak(text):
+    """Speaks the text in a separate background thread to avoid freezing the camera feed."""
+    def _speak_thread():
+        with speech_lock:
+            try:
+                engine = pyttsx3.init()
+                engine.setProperty("rate", 145)  # Natural speaking rate
+                engine.say(text)
+                engine.runAndWait()
+            except Exception as e:
+                print(f"Text-to-speech error: {e}")
+                
+    t = threading.Thread(target=_speak_thread)
+    t.daemon = True
+    t.start()
+
+# ============================================================
+# Welcome Guide Screen — Hand Icon Drawing Helpers
+# ============================================================
+
+# Color palette
+ACCENT_BLUE = (180, 80, 20)     # BGR deep blue
+ACCENT_GREEN = (60, 160, 30)    # BGR green
+SKIN_COLOR = (180, 210, 235)    # BGR warm skin tone
+SKIN_OUTLINE = (100, 130, 160)  # BGR skin outline
+DARK_TEXT = (40, 40, 40)        # BGR near-black
+LIGHT_GRAY = (180, 180, 180)
+
+def _draw_palm(canvas, cx, cy, sz):
+    """Draws a basic palm (filled ellipse) centered at (cx, cy) with scale sz."""
+    pw = int(sz * 0.55)
+    ph = int(sz * 0.65)
+    cv2.ellipse(canvas, (cx, cy + int(sz * 0.1)), (pw, ph), 0, 0, 360, SKIN_COLOR, -1)
+    cv2.ellipse(canvas, (cx, cy + int(sz * 0.1)), (pw, ph), 0, 0, 360, SKIN_OUTLINE, 2)
+
+def _draw_finger(canvas, x1, y1, x2, y2, thickness=8):
+    """Draws a single finger as a thick rounded line with a circle tip."""
+    cv2.line(canvas, (x1, y1), (x2, y2), SKIN_COLOR, thickness + 4)
+    cv2.line(canvas, (x1, y1), (x2, y2), SKIN_OUTLINE, 2)
+    cv2.circle(canvas, (x2, y2), thickness // 2 + 1, SKIN_COLOR, -1)
+    cv2.circle(canvas, (x2, y2), thickness // 2 + 1, SKIN_OUTLINE, 2)
+
+def draw_thumbs_up(canvas, cx, cy, sz):
+    """Thumbs up: fist with thumb pointing up."""
+    s = sz // 2
+    # Fist body
+    fx, fy = cx, cy + int(s * 0.3)
+    cv2.ellipse(canvas, (fx, fy), (int(s*0.5), int(s*0.4)), 0, 0, 360, SKIN_COLOR, -1)
+    cv2.ellipse(canvas, (fx, fy), (int(s*0.5), int(s*0.4)), 0, 0, 360, SKIN_OUTLINE, 2)
+    # Thumb pointing up
+    _draw_finger(canvas, cx - int(s*0.15), cy + int(s*0.05), cx - int(s*0.15), cy - int(s*0.7), 7)
+
+def draw_open_palm(canvas, cx, cy, sz):
+    """Open palm: all 5 fingers spread out."""
+    s = sz // 2
+    _draw_palm(canvas, cx, cy, s)
+    # Five fingers fanning out
+    angles = [-55, -25, 0, 25, 50]
+    lengths = [s*0.75, s*0.9, s*0.95, s*0.85, s*0.7]
+    for i, (ang, length) in enumerate(zip(angles, lengths)):
+        rad = np.radians(ang - 90)
+        x2 = int(cx + np.cos(rad) * length)
+        y2 = int(cy + int(s*0.1) + np.sin(rad) * length)
+        base_x = int(cx + np.cos(rad) * s * 0.3)
+        base_y = int(cy + int(s*0.1) + np.sin(rad) * s * 0.3)
+        _draw_finger(canvas, base_x, base_y, x2, y2, 6)
+
+def draw_wave(canvas, cx, cy, sz):
+    """Waving hand: open palm tilted with motion lines."""
+    s = sz // 2
+    # Tilted palm
+    pts = np.array([
+        [cx - int(s*0.4), cy + int(s*0.35)],
+        [cx + int(s*0.5), cy + int(s*0.2)],
+        [cx + int(s*0.45), cy - int(s*0.15)],
+        [cx - int(s*0.35), cy]
+    ], np.int32)
+    cv2.fillPoly(canvas, [pts], SKIN_COLOR)
+    cv2.polylines(canvas, [pts], True, SKIN_OUTLINE, 2)
+    # Fingers
+    offsets = [(-0.2, -0.55), (0.0, -0.7), (0.2, -0.65), (0.38, -0.5)]
+    for ox, oy in offsets:
+        bx = int(cx + ox * s * 0.5)
+        by = int(cy - int(s * 0.05))
+        _draw_finger(canvas, bx, by, int(cx + ox * s), int(cy + oy * s), 5)
+    # Motion arcs
+    cv2.ellipse(canvas, (cx + int(s*0.7), cy - int(s*0.1)), (int(s*0.15), int(s*0.4)), 15, -40, 40, LIGHT_GRAY, 2)
+    cv2.ellipse(canvas, (cx + int(s*0.85), cy - int(s*0.05)), (int(s*0.12), int(s*0.3)), 15, -30, 30, LIGHT_GRAY, 2)
+
+def draw_peace(canvas, cx, cy, sz):
+    """Peace / victory sign: index + middle finger up, rest curled."""
+    s = sz // 2
+    _draw_palm(canvas, cx, cy, s)
+    # Index finger
+    _draw_finger(canvas, cx - int(s*0.15), cy - int(s*0.15), cx - int(s*0.25), cy - int(s*0.8), 6)
+    # Middle finger
+    _draw_finger(canvas, cx + int(s*0.1), cy - int(s*0.2), cx + int(s*0.15), cy - int(s*0.85), 6)
+    # Curled ring + pinky (small arcs)
+    cv2.ellipse(canvas, (cx + int(s*0.3), cy + int(s*0.15)), (int(s*0.12), int(s*0.15)), 0, -120, 60, SKIN_OUTLINE, 2)
+    cv2.ellipse(canvas, (cx + int(s*0.45), cy + int(s*0.25)), (int(s*0.1), int(s*0.12)), 0, -100, 50, SKIN_OUTLINE, 2)
+
+def draw_fist(canvas, cx, cy, sz):
+    """Closed fist."""
+    s = sz // 2
+    fw, fh = int(s * 0.6), int(s * 0.55)
+    cv2.ellipse(canvas, (cx, cy), (fw, fh), 0, 0, 360, SKIN_COLOR, -1)
+    cv2.ellipse(canvas, (cx, cy), (fw, fh), 0, 0, 360, SKIN_OUTLINE, 2)
+    # Knuckle lines
+    for i in range(4):
+        kx = cx - int(s*0.3) + int(i * s * 0.2)
+        cv2.line(canvas, (kx, cy - int(s*0.15)), (kx + int(s*0.05), cy - int(s*0.35)), SKIN_OUTLINE, 2)
+    # Thumb wrap
+    cv2.ellipse(canvas, (cx - int(s*0.45), cy + int(s*0.1)), (int(s*0.2), int(s*0.15)), 30, -60, 120, SKIN_OUTLINE, 2)
+
+def draw_call_me(canvas, cx, cy, sz):
+    """Call me / shaka: pinky + thumb out, others curled."""
+    s = sz // 2
+    _draw_palm(canvas, cx, cy, s)
+    # Thumb out left
+    _draw_finger(canvas, cx - int(s*0.35), cy + int(s*0.1), cx - int(s*0.75), cy + int(s*0.3), 6)
+    # Pinky out right
+    _draw_finger(canvas, cx + int(s*0.35), cy - int(s*0.1), cx + int(s*0.7), cy - int(s*0.6), 6)
+    # Curled fingers
+    for i, ox in enumerate([-0.1, 0.05, 0.2]):
+        cv2.ellipse(canvas, (int(cx + ox*s), cy - int(s*0.25)), (int(s*0.08), int(s*0.12)), 0, -140, 40, SKIN_OUTLINE, 2)
+
+def draw_point_up(canvas, cx, cy, sz):
+    """Pointing up: index finger extended, others curled."""
+    s = sz // 2
+    _draw_palm(canvas, cx, cy, s)
+    # Index finger straight up
+    _draw_finger(canvas, cx - int(s*0.05), cy - int(s*0.2), cx - int(s*0.05), cy - int(s*0.9), 7)
+    # Curled fingers
+    for i, ox in enumerate([0.15, 0.3, 0.42]):
+        cv2.ellipse(canvas, (int(cx + ox*s), cy - int(s*0.05)), (int(s*0.1), int(s*0.15)), 10, -130, 30, SKIN_OUTLINE, 2)
+
+def draw_please(canvas, cx, cy, sz):
+    """Fingers pressed together (prayer / please gesture)."""
+    s = sz // 2
+    # Two palms pressed together
+    lx, rx = cx - int(s*0.2), cx + int(s*0.2)
+    # Left palm
+    cv2.ellipse(canvas, (lx, cy + int(s*0.1)), (int(s*0.3), int(s*0.5)), -5, 0, 360, SKIN_COLOR, -1)
+    cv2.ellipse(canvas, (lx, cy + int(s*0.1)), (int(s*0.3), int(s*0.5)), -5, 0, 360, SKIN_OUTLINE, 2)
+    # Right palm
+    cv2.ellipse(canvas, (rx, cy + int(s*0.1)), (int(s*0.3), int(s*0.5)), 5, 0, 360, SKIN_COLOR, -1)
+    cv2.ellipse(canvas, (rx, cy + int(s*0.1)), (int(s*0.3), int(s*0.5)), 5, 0, 360, SKIN_OUTLINE, 2)
+    # Finger tips meeting at center top
+    for i, oy in enumerate([-0.6, -0.45, -0.25]):
+        y = int(cy + oy * s)
+        cv2.line(canvas, (lx, y), (rx, y), SKIN_OUTLINE, 1)
+    # Center seam
+    cv2.line(canvas, (cx, cy - int(s*0.35)), (cx, cy + int(s*0.5)), SKIN_OUTLINE, 1)
+
+
+# ============================================================
+# Welcome Guide Screen
+# ============================================================
+
+def show_welcome_guide():
+    """
+    Renders a full-screen welcome/onboarding guide using OpenCV.
+    Shows hand sign illustrations (drawn with shapes), gesture names, meanings,
+    and waits for ENTER/SPACE to proceed or Q to quit.
+    Returns True to continue to webcam, False to quit.
+    """
+    # Create a 1280x720 white canvas
+    W, H = 1280, 720
+    canvas = np.ones((H, W, 3), dtype=np.uint8) * 255
+
+    # --- Title Section ---
+    cv2.putText(canvas, "SignSpeak", (W // 2 - 180, 55),
+                cv2.FONT_HERSHEY_DUPLEX, 1.8, ACCENT_BLUE, 3, cv2.LINE_AA)
+    cv2.putText(canvas, "Hand Sign Guide", (W // 2 - 145, 90),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.75, DARK_TEXT, 2, cv2.LINE_AA)
+    # Decorative underline
+    cv2.line(canvas, (W // 2 - 200, 105), (W // 2 + 200, 105), ACCENT_BLUE, 2)
+
+    # --- Column Headers ---
+    header_y = 140
+    cv2.putText(canvas, "HAND SIGN", (100, header_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, LIGHT_GRAY, 1, cv2.LINE_AA)
+    cv2.putText(canvas, "GESTURE", (260, header_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, LIGHT_GRAY, 1, cv2.LINE_AA)
+    cv2.putText(canvas, "MEANING", (500, header_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, LIGHT_GRAY, 1, cv2.LINE_AA)
+    # Right column
+    cv2.putText(canvas, "HAND SIGN", (720, header_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, LIGHT_GRAY, 1, cv2.LINE_AA)
+    cv2.putText(canvas, "GESTURE", (880, header_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, LIGHT_GRAY, 1, cv2.LINE_AA)
+    cv2.putText(canvas, "MEANING", (1100, header_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, LIGHT_GRAY, 1, cv2.LINE_AA)
+    cv2.line(canvas, (60, header_y + 10), (W - 60, header_y + 10), (220, 220, 220), 1)
+
+    # --- Gesture Data (split into 2 columns of 4) ---
+    gestures = [
+        (draw_thumbs_up, "Thumbs Up",       "Good / Yes"),
+        (draw_open_palm,  "Open Palm",       "Stop / Wait"),
+        (draw_wave,       "Wave / Shake",    "Hello"),
+        (draw_peace,      "Two Fingers",     "Peace / Victory"),
+        (draw_fist,       "Closed Fist",     "No / Angry"),
+        (draw_call_me,    "Pinky + Thumb",   "Call Me"),
+        (draw_point_up,   "Point Up",        "Yes / I Agree"),
+        (draw_please,     "Fingers Together", "Please"),
+    ]
+
+    row_height = 110
+    start_y = 205
+    icon_size = 70
+
+    for i, (draw_fn, name, meaning) in enumerate(gestures):
+        col = i // 4  # 0 or 1
+        row = i % 4
+        
+        # Column offsets
+        col_x_offset = col * 620
+        icon_cx = 130 + col_x_offset
+        icon_cy = start_y + row * row_height
+        text_x_name = 260 + col_x_offset
+        text_x_meaning = 500 + col_x_offset
+
+        # Draw the hand icon
+        draw_fn(canvas, icon_cx, icon_cy, icon_size)
+
+        # Gesture name in accent color
+        cv2.putText(canvas, name, (text_x_name, icon_cy + 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, ACCENT_BLUE, 2, cv2.LINE_AA)
+        
+        # Arrow
+        arrow_x = text_x_meaning - 30
+        cv2.arrowedLine(canvas, (arrow_x, icon_cy), (arrow_x + 18, icon_cy), ACCENT_GREEN, 2, tipLength=0.4)
+
+        # Meaning text
+        cv2.putText(canvas, meaning, (text_x_meaning, icon_cy + 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, DARK_TEXT, 1, cv2.LINE_AA)
+
+        # Subtle row separator
+        sep_y = icon_cy + int(row_height * 0.45)
+        if row < 3:
+            cv2.line(canvas, (70 + col_x_offset, sep_y), (580 + col_x_offset, sep_y), (235, 235, 235), 1)
+
+    # --- Confidence Info Box ---
+    info_y = start_y + 4 * row_height + 10
+    cv2.rectangle(canvas, (W // 2 - 200, info_y - 5), (W // 2 + 200, info_y + 30), (240, 248, 255), -1)
+    cv2.rectangle(canvas, (W // 2 - 200, info_y - 5), (W // 2 + 200, info_y + 30), ACCENT_BLUE, 1)
+    cv2.putText(canvas, "Confidence Required: 85%  |  Hold: 1.5 sec", (W // 2 - 185, info_y + 20),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, ACCENT_BLUE, 1, cv2.LINE_AA)
+
+    # --- Footer Instructions ---
+    footer_y = H - 45
+    cv2.putText(canvas, "Press ENTER or SPACE to Start Camera", (W // 2 - 220, footer_y),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, ACCENT_GREEN, 2, cv2.LINE_AA)
+    cv2.putText(canvas, "Press Q to Quit", (W // 2 - 70, footer_y + 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, LIGHT_GRAY, 1, cv2.LINE_AA)
+
+    # --- Show Guide Window ---
+    guide_window = "SignSpeak - Hand Sign Guide"
+    cv2.namedWindow(guide_window, cv2.WND_PROP_FULLSCREEN)
+    cv2.setWindowProperty(guide_window, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+    cv2.imshow(guide_window, canvas)
+
+    print("Welcome guide displayed. Press ENTER/SPACE to start or Q to quit.")
+
+    while True:
+        key = cv2.waitKey(0) & 0xFF
+        if key == 13 or key == 32:  # ENTER or SPACE
+            cv2.destroyWindow(guide_window)
+            return True
+        elif key == ord('q') or key == ord('Q'):
+            cv2.destroyWindow(guide_window)
+            return False
+
+
+def main():
+    # 0. Show the Welcome Guide Screen first
+    if not show_welcome_guide():
+        print("User chose to quit from the welcome guide.")
+        sys.exit(0)
+
+    # 1. Load Pre-trained Sklearn Model
+    if not os.path.exists(MODEL_PATH):
+        print("\n" + "!"*60)
+        print(f"Error: Model not found at '{MODEL_PATH}'")
+        print("Please train your model first using: python train_model.py")
+        print("!"*60 + "\n")
+        sys.exit(1)
+
+    print(f"Loading gesture model from: {MODEL_PATH}...")
+    try:
+        model = joblib.load(MODEL_PATH)
+    except Exception as e:
+        print(f"Failed to load model: {e}")
+        sys.exit(1)
+    print("Model loaded successfully!")
+
+    # Initialize MediaPipe Hands
+    mp_hands = mp.solutions.hands
+    mp_drawing = mp.solutions.drawing_utils
+    mp_drawing_styles = mp.solutions.drawing_styles
+
+    # Open Webcam
+    print("Opening webcam...")
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        print("Error: Could not open webcam.")
+        sys.exit(1)
+
+    # State variables
+    sentence_words = []
+    prev_prediction = None
+    lock_start_time = None
+    feedback_text = ""
+    feedback_frames = 0
+    feedback_color = (0, 255, 0)
+
+    # Set up Fullscreen OpenCV window
+    window_name = "SignSpeak Communicator"
+    cv2.namedWindow(window_name, cv2.WND_PROP_FULLSCREEN)
+    cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+
+    print("\n" + "="*50)
+    print("SignSpeak Communicator Launched (Full Screen)")
+    print("Control Hotkeys:")
+    print("  [SPACE] -> Clear the current sentence")
+    print("  [S]     -> Save the sentence to saved_sentences.txt")
+    print("  [Q]     -> Quit the application")
+    print("="*50 + "\n")
+
+    with mp_hands.Hands(
+        static_image_mode=False,
+        max_num_hands=1,
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5
+    ) as hands:
+
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                print("Failed to capture frame. Exiting...")
+                break
+
+            # Mirror for natural camera selfie-view
+            frame = cv2.flip(frame, 1)
+            h, w, _ = frame.shape
+
+            # RGB conversion for MediaPipe
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            rgb_frame.flags.writeable = False
+            results = hands.process(rgb_frame)
+            rgb_frame.flags.writeable = True
+
+            current_prediction = None
+            confidence = 0.0
+            hand_detected = False
+
+            # MediaPipe Hand Landmarks detection
+            if results.multi_hand_landmarks:
+                hand_detected = True
+                hand_landmarks = results.multi_hand_landmarks[0]
+
+                # Draw Hand Skeleton
+                mp_drawing.draw_landmarks(
+                    frame,
+                    hand_landmarks,
+                    mp_hands.HAND_CONNECTIONS,
+                    mp_drawing_styles.get_default_hand_landmarks_style(),
+                    mp_drawing_styles.get_default_hand_connections_style()
+                )
+
+                # Flatten landmarks
+                flat_landmarks = []
+                for lm in hand_landmarks.landmark:
+                    flat_landmarks.extend([lm.x, lm.y, lm.z])
+                
+                # Single-sample prediction shape
+                X_sample = np.array(flat_landmarks).reshape(1, -1)
+
+                try:
+                    # Run classification model
+                    current_prediction = model.predict(X_sample)[0]
+                    
+                    # Estimate confidence probability
+                    probabilities = model.predict_proba(X_sample)[0]
+                    class_idx = np.where(model.classes_ == current_prediction)[0][0]
+                    confidence = probabilities[class_idx]
+                except Exception:
+                    confidence = 1.0
+
+            # Lock-In Logic
+            countdown = LOCK_IN_DURATION
+            status_text = "Waiting for Hand"
+            status_color = (0, 0, 255) # Red
+
+            if hand_detected and current_prediction:
+                status_text = f"Detecting: {current_prediction.upper()}"
+                status_color = (0, 165, 255) # Orange
+                
+                if confidence >= CONFIDENCE_THRESHOLD:
+                    if current_prediction == prev_prediction:
+                        if lock_start_time is None:
+                            lock_start_time = time.time()
+                        
+                        elapsed = time.time() - lock_start_time
+                        countdown = max(0.0, LOCK_IN_DURATION - elapsed)
+                        status_color = (0, 255, 0) # Green (Active Lock-in)
+
+                        if elapsed >= LOCK_IN_DURATION:
+                            # Speak out loud and add to sentence list
+                            sentence_words.append(current_prediction)
+                            print(f"[ACCUMULATED] Word: '{current_prediction}'")
+                            speak(current_prediction)
+
+                            # Trigger visual feedback
+                            feedback_text = f"Added: {current_prediction.upper()}"
+                            feedback_color = (0, 255, 0)
+                            feedback_frames = 35
+
+                            # Reset lock states
+                            lock_start_time = None
+                            prev_prediction = None
+                    else:
+                        lock_start_time = time.time()
+                        prev_prediction = current_prediction
+                else:
+                    # Confidence below 85%
+                    lock_start_time = None
+                    prev_prediction = None
+            else:
+                lock_start_time = None
+                prev_prediction = None
+
+            # --- Full-Screen Clean UI Render ---
+            # 1. Top HUD bar: status, prediction info
+            overlay = frame.copy()
+            cv2.rectangle(overlay, (0, 0), (w, 140), (0, 0, 0), -1)
+            cv2.addWeighted(overlay, 0.5, frame, 0.5, 0, frame)
+
+            cv2.putText(frame, "SignSpeak Communicator v1.0", (20, 35), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+
+            # Draw prediction stats
+            cv2.putText(frame, f"Status: {status_text}", (20, 80), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.85, status_color, 2, cv2.LINE_AA)
+
+            if hand_detected and current_prediction:
+                # Progress bar for confidence
+                bar_w, bar_h = 220, 16
+                bar_x, bar_y = 20, 95
+                cv2.rectangle(frame, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), (80, 80, 80), -1)
+                cv2.rectangle(frame, (bar_x, bar_y), (bar_x + int(bar_w * confidence), bar_y + bar_h), status_color, -1)
+                cv2.putText(frame, f"{confidence*100:.0f}% Match", (bar_x + bar_w + 15, bar_y + 13), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1, cv2.LINE_AA)
+
+                # Countdown clock helper
+                if lock_start_time is not None:
+                    cv2.putText(frame, f"Locking in: {countdown:.1f}s", (w - 240, 35), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
+
+            # 2. Bottom sentence HUD banner
+            cv2.rectangle(frame, (0, h - 120), (w, h), (15, 15, 15), -1)
+            cv2.rectangle(frame, (0, h - 120), (w, h - 117), (0, 255, 255), -1) # Colored divider border
+
+            sentence_str = " ".join(sentence_words).upper()
+            if not sentence_str:
+                sentence_str = "(START GESTURING TO BUILD SENTENCE)"
+                text_color = (120, 120, 120)
+            else:
+                text_color = (255, 255, 255)
+
+            # Draw sentence text
+            cv2.putText(frame, "Sentence Output:", (20, h - 85), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1, cv2.LINE_AA)
+            cv2.putText(frame, sentence_str, (20, h - 45), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, text_color, 2, cv2.LINE_AA)
+
+            # Instructions shortcuts
+            cv2.putText(frame, "SPACE: Clear Sentence | S: Save Sentence | Q: Quit Fullscreen", (w - 550, h - 85), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1, cv2.LINE_AA)
+
+            # 3. Trigger feedback overlays
+            if feedback_frames > 0:
+                cv2.putText(frame, feedback_text, (w // 2 - 120, h // 2 - 50), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, feedback_color, 3, cv2.LINE_AA)
+                feedback_frames -= 1
+
+            # Render frame
+            cv2.imshow(window_name, frame)
+
+            # 4. Handle Key Events
+            key = cv2.waitKey(1) & 0xFF
+            
+            # SPACE bar: Clear sentence
+            if key == 32: 
+                sentence_words.clear()
+                feedback_text = "SENTENCE CLEARED"
+                feedback_color = (0, 165, 255) # Orange
+                feedback_frames = 25
+                print("Sentence cleared.")
+
+            # S key: Save sentence
+            elif key == ord('s') or key == ord('S'):
+                if sentence_words:
+                    full_sentence = " ".join(sentence_words)
+                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    try:
+                        with open(SAVE_FILE_PATH, "a") as f:
+                            f.write(f"[{timestamp}] {full_sentence}\n")
+                        feedback_text = "SENTENCE SAVED!"
+                        feedback_color = (0, 255, 0)
+                        feedback_frames = 30
+                        print(f"Saved sentence to {SAVE_FILE_PATH}: '{full_sentence}'")
+                    except Exception as e:
+                        feedback_text = f"Save failed: {e}"
+                        feedback_color = (0, 0, 255)
+                        feedback_frames = 30
+                        print(f"Error saving file: {e}")
+                else:
+                    feedback_text = "EMPTY SENTENCE - NOT SAVED"
+                    feedback_color = (0, 0, 255)
+                    feedback_frames = 25
+
+            # Q key: Quit
+            elif key == ord('q') or key == ord('Q'):
+                print("Exiting communicator app...")
+                break
+
+    # Resource release
+    cap.release()
+    cv2.destroyAllWindows()
+    print("Webcam released. Goodbye!")
+
+if __name__ == "__main__":
+    main()

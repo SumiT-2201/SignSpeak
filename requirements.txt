@@ -2,3 +2,7 @@ mediapipe==0.10.14
 opencv-python
 pandas
 numpy
+scikit-learn
+pyttsx3
+joblib
+pygame

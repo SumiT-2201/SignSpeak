@@ -1,0 +1,10 @@
+good
+hello
+help
+i_love_you
+no
+please
+sorry
+stop
+thank_you
+yes
