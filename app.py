@@ -521,6 +521,8 @@ def main():
     feedback_text = ""
     feedback_frames = 0
     feedback_color = (0, 255, 0)
+    has_locked_word = False
+    has_added_comma = False
 
     # Set up Fullscreen OpenCV window
     window_name = "SignSpeak Communicator"
@@ -530,9 +532,13 @@ def main():
     print("\n" + "="*50)
     print("SignSpeak Communicator Launched (Full Screen)")
     print("Control Hotkeys:")
-    print("  [SPACE] -> Clear the current sentence")
-    print("  [S]     -> Save the sentence to saved_sentences.txt")
-    print("  [Q]     -> Quit the application")
+    print("  [TAB]       -> Settings Panel")
+    print("  [BACKSPACE] -> Delete last word")
+    print("  [SPACE]     -> Add space between words")
+    print("  [ENTER]     -> Speak full sentence out loud")
+    print("  [DELETE]    -> Clear entire sentence")
+    print("  [S]         -> Save the sentence to saved_sentences.txt")
+    print("  [Q]         -> Quit the application")
     print("="*50 + "\n")
 
     with mp_hands.Hands(
@@ -611,11 +617,17 @@ def main():
                             lock_start_time = time.time()
                         
                         elapsed = time.time() - lock_start_time
-                        countdown = max(0.0, LOCK_IN_DURATION - elapsed)
-                        status_color = (0, 255, 0) # Green (Active Lock-in)
+                        
+                        # Phase 1: Lock-in (1.5 seconds)
+                        if elapsed < LOCK_IN_DURATION:
+                            countdown = max(0.0, LOCK_IN_DURATION - elapsed)
+                            status_color = (0, 255, 0) # Green (Active Lock-in)
+                        else:
+                            countdown = 0.0
+                            status_color = (0, 255, 255) # Yellow/Cyan (Hold for Comma)
 
-                        if elapsed >= LOCK_IN_DURATION:
-                            # Speak out loud and add to sentence list
+                        # At 1.5 seconds, append word
+                        if elapsed >= LOCK_IN_DURATION and not has_locked_word:
                             sentence_words.append(current_prediction)
                             print(f"[ACCUMULATED] Word: '{current_prediction}'")
                             speak(current_prediction)
@@ -624,20 +636,33 @@ def main():
                             feedback_text = f"Added: {current_prediction.upper()}"
                             feedback_color = (0, 255, 0)
                             feedback_frames = 35
+                            has_locked_word = True
 
-                            # Reset lock states
-                            lock_start_time = None
-                            prev_prediction = None
+                        # At 3.0 seconds, append comma
+                        if elapsed >= 3.0 and not has_added_comma:
+                            if sentence_words:
+                                sentence_words[-1] += ","
+                                print("[PUNCTUATION] Added comma")
+                                feedback_text = "Comma Added"
+                                feedback_color = (0, 255, 255)
+                                feedback_frames = 35
+                                has_added_comma = True
                     else:
                         lock_start_time = time.time()
                         prev_prediction = current_prediction
+                        has_locked_word = False
+                        has_added_comma = False
                 else:
                     # Confidence below threshold
                     lock_start_time = None
                     prev_prediction = None
+                    has_locked_word = False
+                    has_added_comma = False
             else:
                 lock_start_time = None
                 prev_prediction = None
+                has_locked_word = False
+                has_added_comma = False
 
             # --- Full-Screen Clean UI Render ---
             # 1. Top HUD bar: status, prediction info
@@ -666,25 +691,27 @@ def main():
                     cv2.putText(frame, f"Locking in: {countdown:.1f}s", (w - 240, 35), 
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
 
-            # 2. Bottom sentence HUD banner
-            cv2.rectangle(frame, (0, h - 120), (w, h), (15, 15, 15), -1)
-            cv2.rectangle(frame, (0, h - 120), (w, h - 117), (0, 255, 255), -1) # Colored divider border
+            # 2. Large Bottom Sentence HUD Text Box Card
+            box_height = 160
+            cv2.rectangle(frame, (20, h - box_height), (w - 20, h - 20), (20, 20, 20), -1) # Dark card background
+            cv2.rectangle(frame, (20, h - box_height), (w - 20, h - 20), (0, 255, 255), 2) # Cyan border
 
-            sentence_str = " ".join(sentence_words).upper()
+            sentence_str = " ".join(sentence_words)
             if not sentence_str:
-                sentence_str = "(START GESTURING TO BUILD SENTENCE)"
+                sentence_str_display = "Start gesturing to build a sentence..."
                 text_color = (120, 120, 120)
             else:
+                sentence_str_display = sentence_str
                 text_color = (255, 255, 255)
 
-            # Draw sentence text
-            cv2.putText(frame, "Sentence Output:", (20, h - 85), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1, cv2.LINE_AA)
-            cv2.putText(frame, sentence_str, (20, h - 45), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, text_color, 2, cv2.LINE_AA)
+            # Draw sentence labels and current sentence
+            cv2.putText(frame, "Sentence Builder:", (40, h - box_height + 30), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
+            cv2.putText(frame, sentence_str_display, (40, h - 75), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.1, text_color, 2, cv2.LINE_AA)
 
             # Instructions shortcuts
-            cv2.putText(frame, "TAB: Settings | SPACE: Clear | S: Save | Q: Quit", (w - 560, h - 85), 
+            cv2.putText(frame, "TAB: Settings | BACKSPACE: Delete Word | SPACE: Add Space | ENTER: Speak Sentence | DELETE: Clear | S: Save | Q: Quit", (40, h - 35), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1, cv2.LINE_AA)
 
             # 3. Trigger feedback overlays
@@ -725,11 +752,37 @@ def main():
                     cv2.namedWindow(window_name, cv2.WND_PROP_FULLSCREEN)
                     cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
-            # SPACE bar: Clear sentence
-            elif key == 32: 
+            # BACKSPACE key: Delete last word
+            elif key == 8:
+                if sentence_words:
+                    removed = sentence_words.pop()
+                    print(f"Removed word: '{removed}'")
+                    feedback_text = "Word Deleted"
+                    feedback_color = (0, 165, 255) # Orange
+                    feedback_frames = 25
+
+            # SPACE key: Add space between words
+            elif key == 32:
+                sentence_words.append("")
+                feedback_text = "Space Added"
+                feedback_color = (255, 255, 255)
+                feedback_frames = 15
+
+            # ENTER key: Speak full sentence
+            elif key == 13:
+                if sentence_words:
+                    full_sentence = " ".join(sentence_words)
+                    print(f"Speaking sentence: '{full_sentence}'")
+                    speak(full_sentence)
+                    feedback_text = "Speaking Sentence..."
+                    feedback_color = (0, 255, 0)
+                    feedback_frames = 30
+
+            # DELETE key: Clear entire sentence
+            elif key in [127, 46, 255, 3014656]:
                 sentence_words.clear()
-                feedback_text = "SENTENCE CLEARED"
-                feedback_color = (0, 165, 255) # Orange
+                feedback_text = "Sentence Cleared"
+                feedback_color = (0, 0, 255) # Red
                 feedback_frames = 25
                 print("Sentence cleared.")
 
