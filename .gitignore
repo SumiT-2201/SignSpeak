@@ -1,0 +1,20 @@
+# Virtual environment
+venv/
+ENV/
+env/
+.env
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# OpenCV/MediaPipe temporary files or system files
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/
+
+# Data files (optional, but good to keep landmarks.csv if desired; we can commit it or keep it depending on size. Let's keep it tracked unless it's huge. Actually, let's keep CSV tracked but ignore other temporary raw outputs.)
