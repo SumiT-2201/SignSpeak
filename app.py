@@ -14,43 +14,164 @@ import joblib
 import threading
 import numpy as np
 import mediapipe as mp
-import pyttsx3
 import tkinter as tk
 from tkinter import ttk, messagebox
 import subprocess
 from datetime import datetime
+import json
+import pygame
+from gtts import gTTS
+import io
 
 MODEL_PATH = "models/sign_model.pkl"
 LOCK_IN_DURATION = 1.5  # Seconds to hold a gesture to speak/lock it
 SAVE_FILE_PATH = "saved_sentences.txt"
+CONFIG_PATH = "config.json"
 
-# Dynamic application configurations
-app_settings = {
-    "confidence_threshold": 0.85,
-    "sound_enabled": True,
-    "auto_speak_enabled": True,
-    "show_landmarks": True,
-    "show_confidence_bar": True,
-    "restart_camera": False,
-    "reload_model": False
+# Initialize pygame mixer for TTS and sounds
+try:
+    if not pygame.mixer.get_init():
+        pygame.mixer.init()
+except Exception as e:
+    print(f"Failed to initialize pygame mixer: {e}")
+
+# Multi-language sign vocabulary translations
+TRANSLATIONS = {
+    "English": {
+        "code": "en",
+        "flag": "[EN]",
+        "hello": "Hello",
+        "yes": "Yes",
+        "no": "No",
+        "thank_you": "Thank you",
+        "i_love_you": "I love you",
+        "please": "Please",
+        "sorry": "Sorry",
+        "good": "Good",
+        "help": "Help",
+        "stop": "Stop"
+    },
+    "Hindi": {
+        "code": "hi",
+        "flag": "[HI]",
+        "hello": "Namaste",
+        "yes": "Haan",
+        "no": "Nahi",
+        "thank_you": "Dhanyawad",
+        "i_love_you": "Main tumse pyar karta hoon",
+        "please": "Kripya",
+        "sorry": "Maaf kijiye",
+        "good": "Accha",
+        "help": "Madad",
+        "stop": "Rukiye"
+    },
+    "Marathi": {
+        "code": "mr",
+        "flag": "[MR]",
+        "hello": "Namaskar",
+        "yes": "Ho",
+        "no": "Nahi",
+        "thank_you": "Aabhar",
+        "i_love_you": "Majha tuzhyavar prem aahe",
+        "please": "Krupaya",
+        "sorry": "Mafi asavi",
+        "good": "Chaan",
+        "help": "Madat",
+        "stop": "Thamba"
+    },
+    "Tamil": {
+        "code": "ta",
+        "flag": "[TA]",
+        "hello": "Vanakkam",
+        "yes": "Aamaam",
+        "no": "Illai",
+        "thank_you": "Nandri",
+        "i_love_you": "Naan unnai kadhalikkiren",
+        "please": "Thayavu seidhu",
+        "sorry": "Mannikkavum",
+        "good": "Nalladhu",
+        "help": "Udhavi",
+        "stop": "Nillungal"
+    }
 }
+
+def load_config():
+    """Loads configuration options from config.json, applying default values."""
+    defaults = {
+        "selected_language": "English",
+        "confidence_threshold": 0.85,
+        "sound_enabled": True,
+        "auto_speak_enabled": True,
+        "show_landmarks": True,
+        "show_confidence_bar": True
+    }
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, "r") as f:
+                data = json.load(f)
+                defaults.update(data)
+        except Exception:
+            pass
+    return defaults
+
+def save_config(config):
+    """Saves non-transient configuration settings to config.json."""
+    try:
+        save_data = {k: v for k, v in config.items() if k not in ["restart_camera", "reload_model"]}
+        with open(CONFIG_PATH, "w") as f:
+            json.dump(save_data, f, indent=4)
+    except Exception as e:
+        print(f"Error saving config: {e}")
+
+# Load active settings
+app_settings = load_config()
+app_settings["restart_camera"] = False
+app_settings["reload_model"] = False
 
 # Thread-safe Speech Synthesis helper
 speech_lock = threading.Lock()
 
+def translate_text(text, target_lang):
+    """Translates individual sign words in a text sentence while preserving commas and spacers."""
+    words = text.split(" ")
+    translated_words = []
+    lang_dict = TRANSLATIONS.get(target_lang, TRANSLATIONS["English"])
+    for w in words:
+        if not w:
+            translated_words.append("")
+            continue
+        clean_w = w.lower().replace(",", "").replace(".", "").strip()
+        trans_w = lang_dict.get(clean_w, w)
+        if w.endswith(","):
+            trans_w += ","
+        translated_words.append(trans_w)
+    return " ".join(translated_words)
+
 def speak(text):
-    """Speaks the text in a separate background thread to avoid freezing the camera feed."""
+    """Speaks the text using Google Text-to-Speech (gTTS) in the selected language."""
     if not app_settings.get("sound_enabled", True):
         return
+        
+    lang_name = app_settings.get("selected_language", "English")
+    lang_code = TRANSLATIONS.get(lang_name, {}).get("code", "en")
+    translated_text = translate_text(text, lang_name)
+    
     def _speak_thread():
         with speech_lock:
             try:
-                engine = pyttsx3.init()
-                engine.setProperty("rate", 145)  # Natural speaking rate
-                engine.say(text)
-                engine.runAndWait()
+                # Generate gTTS audio in memory
+                tts = gTTS(text=translated_text, lang=lang_code)
+                fp = io.BytesIO()
+                tts.write_to_fp(fp)
+                fp.seek(0)
+                
+                # Load and play using pygame music player
+                pygame.mixer.music.load(fp, "mp3")
+                pygame.mixer.music.play()
+                while pygame.mixer.music.get_busy():
+                    time.sleep(0.05)
             except Exception as e:
-                print(f"Text-to-speech error: {e}")
+                print(f"gTTS Speech synthesis error: {e}")
                 
     t = threading.Thread(target=_speak_thread)
     t.daemon = True
@@ -389,6 +510,22 @@ def show_settings_dialog(current_settings, cap):
     
     tk.Label(slider_row, textvariable=slider_label_var, font=("Helvetica", 10, "bold"), width=5, bg=bg_color).pack(side="right")
     
+    # Language Selector Dropdown
+    lang_frame = tk.Frame(main_frame, bg=bg_color)
+    lang_frame.pack(fill="x", pady=(5, 10))
+    
+    tk.Label(lang_frame, text="System Language:", font=("Helvetica", 10, "bold"), bg=bg_color).pack(side="left", padx=(0, 10))
+    
+    lang_var = tk.StringVar(value=current_settings.get("selected_language", "English"))
+    lang_cb = ttk.Combobox(lang_frame, textvariable=lang_var, values=["English", "Hindi", "Marathi", "Tamil"], state="readonly", width=15)
+    lang_cb.pack(side="left")
+    
+    def on_lang_change(event):
+        current_settings["selected_language"] = lang_var.get()
+        save_config(current_settings)
+        
+    lang_cb.bind("<<ComboboxSelected>>", on_lang_change)
+    
     # 3. Toggles Panel
     toggles_card = tk.LabelFrame(main_frame, text=" Toggles / Preferences ", bg=card_bg, fg=accent_blue, font=("Helvetica", 10, "bold"), padx=15, pady=10)
     toggles_card.pack(fill="x", pady=5)
@@ -403,6 +540,7 @@ def show_settings_dialog(current_settings, cap):
         current_settings["auto_speak_enabled"] = speak_var.get()
         current_settings["show_landmarks"] = landmarks_var.get()
         current_settings["show_confidence_bar"] = confidence_var.get()
+        save_config(current_settings)
         
     t1 = ttk.Checkbutton(toggles_card, text="Sound ON", variable=sound_var, command=update_toggles)
     t1.grid(row=0, column=0, sticky="w", pady=5, padx=10)
@@ -472,7 +610,11 @@ def show_settings_dialog(current_settings, cap):
     add_btn.pack(side="right", fill="x", expand=True, padx=(5, 0))
     
     # Close button at the bottom
-    close_btn = tk.Button(main_frame, text="Close & Apply", bg="#6b7280", fg="white", activebackground="#4b5563", font=("Helvetica", 10, "bold"), pady=5, command=root.destroy)
+    def on_close():
+        save_config(current_settings)
+        root.destroy()
+        
+    close_btn = tk.Button(main_frame, text="Close & Apply", bg="#6b7280", fg="white", activebackground="#4b5563", font=("Helvetica", 10, "bold"), pady=5, command=on_close)
     close_btn.pack(fill="x", pady=(5, 0))
 
     # Wait for the settings window to close (blocking the OpenCV loop)
@@ -677,6 +819,12 @@ def main():
             cv2.putText(frame, f"Status: {status_text}", (20, 80), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.85, status_color, 2, cv2.LINE_AA)
 
+            # Draw language flag in top right corner
+            lang_name = app_settings.get("selected_language", "English")
+            lang_flag = TRANSLATIONS.get(lang_name, {}).get("flag", "[EN]")
+            cv2.putText(frame, f"LANG: {lang_name.upper()} {lang_flag}", (w - 280, 80), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2, cv2.LINE_AA)
+
             if hand_detected and current_prediction and app_settings["show_confidence_bar"]:
                 # Progress bar for confidence
                 bar_w, bar_h = 220, 16
@@ -711,7 +859,7 @@ def main():
                         cv2.FONT_HERSHEY_SIMPLEX, 1.1, text_color, 2, cv2.LINE_AA)
 
             # Instructions shortcuts
-            cv2.putText(frame, "TAB: Settings | BACKSPACE: Delete Word | SPACE: Add Space | ENTER: Speak Sentence | DELETE: Clear | S: Save | Q: Quit", (40, h - 35), 
+            cv2.putText(frame, "TAB: Settings | L: Cycle Language | BACKSPACE: Delete | SPACE: Space | ENTER: Speak | DELETE: Clear | S: Save | Q: Quit", (40, h - 35), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1, cv2.LINE_AA)
 
             # 3. Trigger feedback overlays
@@ -751,6 +899,24 @@ def main():
                     # Recreate window to make sure it's active
                     cv2.namedWindow(window_name, cv2.WND_PROP_FULLSCREEN)
                     cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+
+            # L key: Cycle through languages
+            elif key == ord('l') or key == ord('L'):
+                languages = list(TRANSLATIONS.keys())
+                current_lang = app_settings.get("selected_language", "English")
+                try:
+                    curr_idx = languages.index(current_lang)
+                    next_idx = (curr_idx + 1) % len(languages)
+                except ValueError:
+                    next_idx = 0
+                next_lang = languages[next_idx]
+                app_settings["selected_language"] = next_lang
+                save_config(app_settings)
+                
+                feedback_text = f"Language: {next_lang.upper()}"
+                feedback_color = (0, 255, 255)
+                feedback_frames = 25
+                print(f"Cycled language to: {next_lang}")
 
             # BACKSPACE key: Delete last word
             elif key == 8:
