@@ -15,18 +15,33 @@ import threading
 import numpy as np
 import mediapipe as mp
 import pyttsx3
+import tkinter as tk
+from tkinter import ttk, messagebox
+import subprocess
 from datetime import datetime
 
 MODEL_PATH = "models/sign_model.pkl"
 LOCK_IN_DURATION = 1.5  # Seconds to hold a gesture to speak/lock it
-CONFIDENCE_THRESHOLD = 0.85  # Minimum confidence to trigger lock-in
 SAVE_FILE_PATH = "saved_sentences.txt"
+
+# Dynamic application configurations
+app_settings = {
+    "confidence_threshold": 0.85,
+    "sound_enabled": True,
+    "auto_speak_enabled": True,
+    "show_landmarks": True,
+    "show_confidence_bar": True,
+    "restart_camera": False,
+    "reload_model": False
+}
 
 # Thread-safe Speech Synthesis helper
 speech_lock = threading.Lock()
 
 def speak(text):
     """Speaks the text in a separate background thread to avoid freezing the camera feed."""
+    if not app_settings.get("sound_enabled", True):
+        return
     def _speak_thread():
         with speech_lock:
             try:
@@ -293,6 +308,178 @@ def show_welcome_guide():
             return False
 
 
+def show_settings_dialog(current_settings, cap):
+    """
+    Opens a Tkinter settings window to modify confidence threshold, toggles,
+    displays model accuracy and type, and provides buttons to retrain the model
+    or add new signs. Releases camera temporarily if adding signs.
+    """
+    # Create the root window
+    root = tk.Tk()
+    root.title("SignSpeak Settings")
+    root.geometry("460x520")
+    root.resizable(False, False)
+    
+    # Set dark blue and light gray theme
+    bg_color = "#f4f6f9"
+    card_bg = "#ffffff"
+    accent_blue = "#1450b4"
+    text_color = "#333333"
+    
+    root.configure(bg=bg_color)
+    
+    # Style configuration
+    style = ttk.Style()
+    style.theme_use("clam")
+    style.configure("TFrame", background=bg_color)
+    style.configure("TLabel", background=bg_color, foreground=text_color, font=("Helvetica", 10))
+    style.configure("TButton", background=accent_blue, foreground="white", borderwidth=0, font=("Helvetica", 10, "bold"))
+    style.map("TButton", background=[("active", "#0f3d8a")])
+    style.configure("TCheckbutton", background=card_bg, font=("Helvetica", 10))
+    
+    # Header
+    header_frame = tk.Frame(root, bg=accent_blue, height=60)
+    header_frame.pack(fill="x")
+    header_label = tk.Label(header_frame, text="SignSpeak Control Settings", bg=accent_blue, fg="white", font=("Helvetica", 14, "bold"))
+    header_label.pack(pady=15)
+    
+    # Main Container
+    main_frame = tk.Frame(root, bg=bg_color, padx=20, pady=15)
+    main_frame.pack(fill="both", expand=True)
+    
+    # 1. Info Card (Model name & Accuracy)
+    info_card = tk.LabelFrame(main_frame, text=" AI Recognition Model ", bg=card_bg, fg=accent_blue, font=("Helvetica", 10, "bold"), padx=15, pady=10)
+    info_card.pack(fill="x", pady=5)
+    
+    tk.Label(info_card, text="Model: RandomForestClassifier (200 estimators)", bg=card_bg, fg=text_color, font=("Helvetica", 9, "bold")).pack(anchor="w")
+    
+    # Accuracy Display
+    accuracy_text = "N/A"
+    accuracy_file = "models/accuracy.txt"
+    if os.path.exists(accuracy_file):
+        try:
+            with open(accuracy_file, "r") as f:
+                accuracy_text = f.read().strip()
+        except Exception:
+            pass
+            
+    accuracy_var = tk.StringVar(value=f"Model Accuracy: {accuracy_text}")
+    accuracy_lbl = tk.Label(info_card, textvariable=accuracy_var, bg=card_bg, fg="#10b981", font=("Helvetica", 9, "bold"))
+    accuracy_lbl.pack(anchor="w", pady=(5, 0))
+    
+    # 2. Confidence Threshold Slider (50% to 95%)
+    slider_frame = tk.Frame(main_frame, bg=bg_color)
+    slider_frame.pack(fill="x", pady=10)
+    
+    tk.Label(slider_frame, text="Confidence Threshold:", font=("Helvetica", 10, "bold"), bg=bg_color).pack(anchor="w")
+    
+    slider_val = tk.DoubleVar(value=current_settings["confidence_threshold"])
+    slider_label_var = tk.StringVar(value=f"{int(current_settings['confidence_threshold'] * 100)}%")
+    
+    def on_slider_change(val):
+        pct = int(float(val) * 100)
+        slider_label_var.set(f"{pct}%")
+        current_settings["confidence_threshold"] = float(val)
+        
+    slider_row = tk.Frame(slider_frame, bg=bg_color)
+    slider_row.pack(fill="x", pady=5)
+    
+    slider = ttk.Scale(slider_row, from_=0.50, to=0.95, variable=slider_val, command=on_slider_change, orient="horizontal")
+    slider.pack(side="left", fill="x", expand=True, padx=(0, 10))
+    
+    tk.Label(slider_row, textvariable=slider_label_var, font=("Helvetica", 10, "bold"), width=5, bg=bg_color).pack(side="right")
+    
+    # 3. Toggles Panel
+    toggles_card = tk.LabelFrame(main_frame, text=" Toggles / Preferences ", bg=card_bg, fg=accent_blue, font=("Helvetica", 10, "bold"), padx=15, pady=10)
+    toggles_card.pack(fill="x", pady=5)
+    
+    sound_var = tk.BooleanVar(value=current_settings["sound_enabled"])
+    speak_var = tk.BooleanVar(value=current_settings["auto_speak_enabled"])
+    landmarks_var = tk.BooleanVar(value=current_settings["show_landmarks"])
+    confidence_var = tk.BooleanVar(value=current_settings["show_confidence_bar"])
+    
+    def update_toggles():
+        current_settings["sound_enabled"] = sound_var.get()
+        current_settings["auto_speak_enabled"] = speak_var.get()
+        current_settings["show_landmarks"] = landmarks_var.get()
+        current_settings["show_confidence_bar"] = confidence_var.get()
+        
+    t1 = ttk.Checkbutton(toggles_card, text="Sound ON", variable=sound_var, command=update_toggles)
+    t1.grid(row=0, column=0, sticky="w", pady=5, padx=10)
+    
+    t2 = ttk.Checkbutton(toggles_card, text="Auto-Speak ON", variable=speak_var, command=update_toggles)
+    t2.grid(row=0, column=1, sticky="w", pady=5, padx=10)
+    
+    t3 = ttk.Checkbutton(toggles_card, text="Show Landmarks", variable=landmarks_var, command=update_toggles)
+    t3.grid(row=1, column=0, sticky="w", pady=5, padx=10)
+    
+    t4 = ttk.Checkbutton(toggles_card, text="Show Confidence Bar", variable=confidence_var, command=update_toggles)
+    t4.grid(row=1, column=1, sticky="w", pady=5, padx=10)
+    
+    # 4. Action Buttons (Retrain, Add New Signs)
+    btn_frame = tk.Frame(main_frame, bg=bg_color)
+    btn_frame.pack(fill="x", pady=15)
+    
+    def on_retrain():
+        confirm = messagebox.askyesno("Retrain Model", "Do you want to retrain the AI model now?\nThis might take a few seconds.")
+        if confirm:
+            retrain_btn.config(state="disabled", text="Training...")
+            root.update()
+            
+            try:
+                # Run train_model.py
+                result = subprocess.run([sys.executable, "train_model.py"], capture_output=True, text=True)
+                if result.returncode == 0:
+                    messagebox.showinfo("Success", "Model retrained successfully!")
+                    current_settings["reload_model"] = True
+                    # Reload new model accuracy
+                    if os.path.exists(accuracy_file):
+                        with open(accuracy_file, "r") as f:
+                            accuracy_text = f.read().strip()
+                        accuracy_var.set(f"Model Accuracy: {accuracy_text}")
+                else:
+                    messagebox.showerror("Error", f"Model training failed:\n{result.stderr}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to run train_model.py:\n{e}")
+                
+            retrain_btn.config(state="normal", text="Retrain Model")
+            
+    def on_add_signs():
+        confirm = messagebox.askyesno("Add New Signs", "To capture new signs, we need to launch the Data Collector.\nThe camera recognition will pause temporarily.\n\nDo you want to proceed?")
+        if confirm:
+            # Release camera so collect_data.py can use it
+            cap.release()
+            cv2.destroyAllWindows()
+            root.withdraw() # Hide settings window during collection
+            
+            try:
+                # Run collect_data.py
+                print("Launching collect_data.py...")
+                subprocess.run([sys.executable, "data/collect_data.py"])
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to launch collect_data.py:\n{e}")
+                
+            # Reopen settings and let main loop know to restart camera
+            root.deiconify()
+            messagebox.showinfo("Returned", "Returned to SignSpeak. Click OK to restart camera.")
+            current_settings["restart_camera"] = True
+            root.destroy()
+            
+    retrain_btn = tk.Button(btn_frame, text="Retrain Model", bg=accent_blue, fg="white", activebackground="#0f3d8a", font=("Helvetica", 10, "bold"), pady=8, command=on_retrain)
+    retrain_btn.pack(side="left", fill="x", expand=True, padx=(0, 5))
+    
+    add_btn = tk.Button(btn_frame, text="Add New Signs", bg="#10b981", fg="white", activebackground="#059669", font=("Helvetica", 10, "bold"), pady=8, command=on_add_signs)
+    add_btn.pack(side="right", fill="x", expand=True, padx=(5, 0))
+    
+    # Close button at the bottom
+    close_btn = tk.Button(main_frame, text="Close & Apply", bg="#6b7280", fg="white", activebackground="#4b5563", font=("Helvetica", 10, "bold"), pady=5, command=root.destroy)
+    close_btn.pack(fill="x", pady=(5, 0))
+
+    # Wait for the settings window to close (blocking the OpenCV loop)
+    root.focus_force()
+    root.mainloop()
+
+
 def main():
     # 0. Show the Welcome Guide Screen first
     if not show_welcome_guide():
@@ -381,13 +568,14 @@ def main():
                 hand_landmarks = results.multi_hand_landmarks[0]
 
                 # Draw Hand Skeleton
-                mp_drawing.draw_landmarks(
-                    frame,
-                    hand_landmarks,
-                    mp_hands.HAND_CONNECTIONS,
-                    mp_drawing_styles.get_default_hand_landmarks_style(),
-                    mp_drawing_styles.get_default_hand_connections_style()
-                )
+                if app_settings["show_landmarks"]:
+                    mp_drawing.draw_landmarks(
+                        frame,
+                        hand_landmarks,
+                        mp_hands.HAND_CONNECTIONS,
+                        mp_drawing_styles.get_default_hand_landmarks_style(),
+                        mp_drawing_styles.get_default_hand_connections_style()
+                    )
 
                 # Flatten landmarks
                 flat_landmarks = []
@@ -417,7 +605,7 @@ def main():
                 status_text = f"Detecting: {current_prediction.upper()}"
                 status_color = (0, 165, 255) # Orange
                 
-                if confidence >= CONFIDENCE_THRESHOLD:
+                if confidence >= app_settings["confidence_threshold"]:
                     if current_prediction == prev_prediction:
                         if lock_start_time is None:
                             lock_start_time = time.time()
@@ -444,7 +632,7 @@ def main():
                         lock_start_time = time.time()
                         prev_prediction = current_prediction
                 else:
-                    # Confidence below 85%
+                    # Confidence below threshold
                     lock_start_time = None
                     prev_prediction = None
             else:
@@ -464,7 +652,7 @@ def main():
             cv2.putText(frame, f"Status: {status_text}", (20, 80), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.85, status_color, 2, cv2.LINE_AA)
 
-            if hand_detected and current_prediction:
+            if hand_detected and current_prediction and app_settings["show_confidence_bar"]:
                 # Progress bar for confidence
                 bar_w, bar_h = 220, 16
                 bar_x, bar_y = 20, 95
@@ -496,7 +684,7 @@ def main():
                         cv2.FONT_HERSHEY_SIMPLEX, 0.9, text_color, 2, cv2.LINE_AA)
 
             # Instructions shortcuts
-            cv2.putText(frame, "SPACE: Clear Sentence | S: Save Sentence | Q: Quit Fullscreen", (w - 550, h - 85), 
+            cv2.putText(frame, "TAB: Settings | SPACE: Clear | S: Save | Q: Quit", (w - 560, h - 85), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1, cv2.LINE_AA)
 
             # 3. Trigger feedback overlays
@@ -511,8 +699,34 @@ def main():
             # 4. Handle Key Events
             key = cv2.waitKey(1) & 0xFF
             
+            # TAB key: Open settings panel
+            if key == 9:
+                print("Opening settings panel...")
+                show_settings_dialog(app_settings, cap)
+                
+                # Check reload model
+                if app_settings.get("reload_model", False):
+                    app_settings["reload_model"] = False
+                    print("Reloading trained model...")
+                    try:
+                        model = joblib.load(MODEL_PATH)
+                    except Exception as e:
+                        print(f"Failed to load model: {e}")
+                
+                # Check restart camera
+                if app_settings.get("restart_camera", False):
+                    app_settings["restart_camera"] = False
+                    print("Re-initializing webcam...")
+                    cap = cv2.VideoCapture(0)
+                    if not cap.isOpened():
+                        print("Error: Could not reopen webcam.")
+                        sys.exit(1)
+                    # Recreate window to make sure it's active
+                    cv2.namedWindow(window_name, cv2.WND_PROP_FULLSCREEN)
+                    cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+
             # SPACE bar: Clear sentence
-            if key == 32: 
+            elif key == 32: 
                 sentence_words.clear()
                 feedback_text = "SENTENCE CLEARED"
                 feedback_color = (0, 165, 255) # Orange

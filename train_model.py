@@ -88,6 +88,13 @@ def main():
     accuracy = accuracy_score(y_test, y_pred)
     print(f"\nEvaluation Accuracy: {accuracy * 100:.2f}%")
     
+    # Save accuracy to models/accuracy.txt
+    try:
+        with open(os.path.join(MODEL_DIR, "accuracy.txt"), "w") as f:
+            f.write(f"{accuracy * 100:.2f}%")
+    except Exception as e:
+        print(f"Error saving accuracy file: {e}")
+    
     print("\nClassification Report:")
     print(classification_report(y_test, y_pred, zero_division=0))
     
